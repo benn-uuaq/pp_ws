@@ -1,0 +1,19 @@
+# colcon / Python build output
+build/
+install/
+log/
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# Site data written at runtime (calibration results, run images, taught poses, last UI inputs)
+/calibration/
+/picking/
+persist.json
+
+# LUCID Arena SDK / arena_api: licensed by LUCID and very large (several GB).
+# Download them from the LUCID website; see src/lucid_helios/README.md.
+/src/lucid_helios/*
+!/src/lucid_helios/README.md
+!/src/lucid_helios/COLCON_IGNORE

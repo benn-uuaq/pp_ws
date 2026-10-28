@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>piece_picking</name>
+  <version>0.1.0</version>
+  <description>Piece picking - moves the robot to the picking position from the calibration result and the vision product position</description>
+  <maintainer email="hoonyoung323@gmail.com">pp_ws</maintainer>
+  <license>Proprietary</license>
+
+  <!-- uses the robot communication (robot_interface) and the simulated robot (sim mode). A separate program from the calibration GUI -->
+  <!-- Note: two hyphens in a row inside an XML comment break the file and colcon no longer sees it as a ROS package -->
+  <exec_depend>robot_camera_calibration</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pyqt5</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

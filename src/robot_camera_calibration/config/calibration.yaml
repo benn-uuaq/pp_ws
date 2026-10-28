@@ -1,0 +1,130 @@
+# ============================================================================
+# Robot-camera calibration settings (pp_ws)
+# Units: mm and seconds unless noted. Robot poses are m / rad.
+# Origin: D:\RND_WORK\PiecePicking\robot_camera_calibration\config.yaml
+#
+# Robot IP, camera IP, camera position, grid spacing and marker offset changed in the GUI (calib_gui)
+# are not written to this file; they are kept in ui_state.yaml in output.directory
+# and overlaid on this file's values at the next start.
+# ============================================================================
+
+# Camera to calibrate (GUI checkbox). rgb = Triton RGB, depth = Helios ToF
+# Results are saved separately per camera (output.result_files).
+active_camera: rgb
+
+robot:
+  ip: 192.168.1.101             # controller IP (check for the piece-picking cell)
+  port: 30001                    # primary port (state + scripts)
+  # how the robot represents RX/RY/RZ
+  #   rpy    = roll-pitch-yaw, R = Rz*Ry*Rx  (Elite CS)
+  #   rotvec = rotation vector (UR)
+  rotation_convention: rpy
+  velocity: 0.10                 # [m/s] linear speed during calibration
+  acceleration: 0.50             # [m/s^2]
+  # script sent to 30001. {pose} = [x, y, z, rx, ry, rz]
+  move_command: "movel({pose}, a={a}, v={v})"
+  stop_command: "stopl(1.0)"
+  move_timeout_s: 30.0           # if a pose is not reached within this time it is skipped
+  position_tolerance_mm: 1.0     # within this distance counts as reached
+  settle_time_s: 0.5             # wait after stopping before measuring
+
+camera:                          # LUCID Helios2 (Arena SDK)
+  # Helios2+ HTP003S-001, S/N 263501855 (checked 2026-10-27). Empty = auto-discover, but
+  # broadcasts do not reach WSL, so put the IP here (unicast discovery).
+  ip: "192.168.1.35"
+  # Helios2 distance mode. Choose one comfortably longer than the marker distance (Distance1250mmSingleFreq,
+  # Distance3000mmSingleFreq, Distance4000mmSingleFreq, Distance5000mmMultiFreq ...)
+  operating_mode: Distance3000mmSingleFreq
+  exposure_time: ""              # ExposureTimeSelector (e.g. Exp250Us, Exp1000Us). "" = keep the camera setting
+  image_accumulation: 1          # Scan3dImageAccumulation (averages several frames: less noise, fewer frames)
+  spatial_filter: true           # Scan3dSpatialFilterEnable
+  confidence_threshold: true     # Scan3dConfidenceThresholdEnable (removes low-confidence points)
+  timeout_ms: 2000               # frame wait time
+  # stream packets. On WSL (mirrored) bursts of packets get lost and frames break.
+  # measured 2026-10-27: 1500 B + gap 20000 ns -> about 17 fps, 0 broken frames
+  #                      gap 40000 ns -> about 10 fps. gap 0 (default) -> most frames broken
+  packet_size: 1500              # DeviceStreamChannelPacketSize [B], 0 = auto negotiation
+  packet_delay_ns: 20000         # GevSCPD gap between packets [ns]
+
+camera_rgb:                      # LUCID Triton RGB (RGB side of the Helios2+ Chroma, TRI032S-C)
+  ip: "192.168.1.41"
+  pixel_format: BayerRG8         # converted to BGR on receipt (1/3 of the network load of RGB8)
+  # intrinsics. "" = the Chroma factory calibration stored in the camera (CalibFocalLength etc. nodes).
+  # If a file is given it is used instead (OpenCV FileStorage: cameraMatrix, distCoeffs —
+  # tritoncalibration.yml format from LUCID py_HLTRGB_1_calibration).
+  intrinsics_file: ""
+  timeout_ms: 3000
+  packet_size: 1500
+  packet_delay_ns: 20000
+
+marker:
+  dictionary: DICT_4X4_50        # 4x4 id 0 is the same marker in DICT_4X4_50/100/250/1000
+  id: 0
+  size_mm: 60.0                  # side of the black square (used by the simulated camera only)
+  # !!! measure for your tool (can also be entered in the GUI) !!!
+  # reference -> marker centre [mm]. Centre = where the diagonals of the black square cross, on the marker surface.
+  # Not a corner. The axes are the reference frame (flange / TCP), not the base.
+  offset_from_flange_mm: [0.0, 0.0, 0.0]
+  # marker rotation seen from the reference frame [deg], RX/RY/RZ (R = Rz*Ry*Rx, same order as the robot rpy).
+  # marker frame = ArUco standard: X top-left -> top-right corner, Y bottom -> top, Z out of the surface (towards the camera).
+  # Not used for the fit (R, t). After calibration it is compared with the marker orientation measured by the camera
+  # to check the input, and the measured rotation is stored in the result as well.
+  rotation_deg: [0.0, 0.0, 0.0]
+  rotation_tolerance_deg: 5.0    # warn if the input and measured rotation differ by more than this
+  # reference: flange = centre of the flange face (independent of the pendant TCP, recommended)
+  #            tcp    = the active TCP on the pendant (do not change the TCP during calibration)
+  offset_reference: flange
+  # 3D centre measurement: a plane is fitted to the points inside the marker square shrunk around the centre
+  # by this ratio. Kept below 1 to avoid the jumping points on the border.
+  sample_scale: 0.8
+  min_points: 30                 # fewer valid points than this -> no 3D for that frame
+
+sequence:
+  # !!! change for your cell layout (GUI checkbox) !!!
+  # horizontal position of the camera seen from the robot base: +x, -x, +y, -y
+  # the move axes depend on this value (README "Camera-relative move axes").
+  #   +x -> lateral=+Y, depth=+X    -x -> lateral=-Y, depth=-X
+  #   +y -> lateral=-X, depth=+Y    -y -> lateral=+X, depth=-Y
+  camera_side: "+y"
+  points_per_axis: 3             # 3 -> 3x3x3 = 27 poses
+  # grid spacing per camera axis [mm]. The robot moves at most ±step from the start pose.
+  step_mm:
+    lateral: 50.0                # left/right (+ = right as seen by the camera)
+    depth: 50.0                  # depth (+ = towards the camera)
+    vertical: 50.0               # up/down (+ = up, base +Z)
+  return_to_start: true          # return to the start pose when done
+  max_single_step_mm: 100.0      # maximum distance allowed for one motion_tool step
+  frames_per_pose: 10            # frames per pose for the median
+  max_point_std_mm: 3.0          # (depth) drop the pose if the per-frame 3D points spread more than this
+  max_pixel_std_px: 2.0          # (RGB) drop the pose if the per-frame marker centre pixels spread more than this
+  min_valid_samples: 12          # fail if fewer valid poses than this
+  # if a start pose is saved (GUI [Save current pose]), movel there first, then visit the grid
+  start_from_saved: true
+  centering_tolerance_px: 15     # radius of the centre circle (scaled up by image width for RGB)
+
+jog:                             # GUI jog (to set up the calibration start pose)
+  speed_mm_s: 20.0               # move speed (changeable in the GUI)
+  rot_speed_deg_s: 5.0           # rotation speed (changeable in the GUI)
+  acceleration: 0.2              # [m/s^2] move acceleration / deceleration
+  rot_acceleration: 0.5          # [rad/s^2] rotation acceleration / deceleration
+  # continuous jog sends one speedl on press and stopl on release. If the release is missed it stops by itself after this time
+  hold_s: 2.0
+  steps:                         # step mode [move mm, rotate deg]
+    - [1.0, 0.5]
+    - [5.0, 1.0]
+    - [10.0, 2.0]
+    - [50.0, 5.0]
+
+fit:
+  outlier_factor: 3.0            # (depth) residual > factor * median ...
+  outlier_min_mm: 2.0            # ... and larger than this -> excluded once
+  ransac_px: 3.0                 # (RGB) PnP RANSAC reprojection error limit [px]
+  max_rms_mm: 5.0                # above this the main result file is not overwritten (RGB converts the reprojection error to mm)
+
+output:
+  directory: ~/pp_ws/calibration # results, run records, ui_state.yaml
+  result_files:                  # result file per camera (piece picking uses one of them)
+    rgb: calibration_rgb.yaml
+    depth: calibration_depth.yaml
+  start_pose_file: start_pose.yaml   # calibration start pose saved with GUI [Save current pose]
+  save_images: true              # save the display image at every pose

@@ -1,0 +1,232 @@
+{
+  "_comment": [
+    "Elite CS612 Modbus register map. Addresses are not kept in code but managed only in this file.",
+    "An entry with address null means the address is not confirmed. The node refuses that function,",
+    "and the UI disables the related buttons. Once an address is confirmed, only this file needs to be filled in.",
+    "count is the number of consecutive registers to read / write; poses are in [X, Y, Z, Rx, Ry, Rz] order.",
+    "The current TCP uses the robot's own registers 384~389. 260~264 are input fields written by RCS",
+    "before a job starts (radius, thickness, probe coverage, EOAT type). The task writes nothing",
+    "there — it once overwrote the TCP and the next cell read the coordinates as the radius.",
+    "Write addresses are in the general-purpose registers (256~383) read by the robot task.",
+    "Jog and home moves use 30001 scripts, not registers, so they are not listed here.",
+    "kind is the unit conversion method. pose treats the first 3 as position and the last 3 as rotation,",
+    "angle treats all 6 as rotations. Joint angles are mrad on all 6 axes, so they are angle.",
+    "raw stores the value as an integer as is (no sub-unit decimals). work_area is",
+    "one of these — app_width/height/overlap are plain mm and scan_h is 0.1 mm.",
+    "scan_state (290~299) is the progress state written by the robot task. In order:",
+    "state, row_idx, rows, alive, zero_ok, finished, pitch, progress, progress2,",
+    "probe_error; a cell's scan is complete when state==5 && finished==1.",
+    "probe_error (299): 0 = OK, 1 = probe_c, 2 = probe_l, 3 = probe_r contact failed, 4 = arc length / radius is 0 —",
+    "written by the sensor versions pc_press/al_press/pr_press right before halt() (dus_init resets it",
+    "to 0). operator-ui watches it change, handles the alarm and sends MQTT",
+    "evt/error (erut_session.raise_error path, see app.py).",
+    "home_flag (276) tells whether the robot is at home (1 home, 0 away). The task's publishing thread",
+    "compares the joints with Home_joint every control cycle and writes it (1 even if the TCP is at Home_pose),",
+    "and it becomes 0 the moment the robot leaves home. When the task is not running this node manages it —",
+    "writing 0 when a jog is sent and 1 when move_home finishes. RCS moves the vehicle / lift only after",
+    "checking both this value and task_state (so the platform does not rise while the robot",
+    "is going home).",
+    "vehicle_ready (309) is the interlock in the opposite direction. RCS writes 1 when it confirms the vehicle has",
+    "stopped, the outriggers are locked and the lift has stopped, and 0 as soon as any of the three",
+    "starts moving. The robot task waits for this value to be 1 before moving (dus5_init) and",
+    "right before scanning (dus5_goto_zero) (state 290 = 14).",
+    "If it does not become 1 within about 2 minutes, the robot writes 299 = 8 and stops.",
+    "task_state (500) is the task state from the robot controller (1 running, 2 paused,",
+    "3 stopped). It is an input register, not holding, so it is read through the driver's fallback path.",
+    "Asking for the state via 29999 needs a command every time, so it is monitored here instead.",
+    "speed_scale (17) is the robot motion speed scale ratio [%] 2~100. It is read only",
+    "and not written — the setting is sent with 29999 'speed -v N'. Writing the register directly",
+    "also works, but the control path is kept in one place (29999).",
+    "work_area (256~261) is the grid information the robot uses to compute the arc. In order:",
+    "  256 arc length [mm] 257 grid height [mm] 258 scanner height [0.1mm]",
+    "The 0.1 mm fields (258/260/261/262/263) hold values with decimals —",
+    "e.g. radius 834.6, effective coverage 167.5. Rounding to integer mm visibly distorts the arc shape and",
+    "the row spacing.",
+    "the arc shape is visibly distorted. kind=raw, so the node writes the value as an integer as is —",
+    "the 0.1 mm conversion is multiplied in beforehand by the sender (operator-ui).",
+    "  259 minimum overlap [mm] 260 radius [0.1mm]  261 thickness [0.1mm]",
+    "  262 probe effective width [0.1mm]  263 probe effective height [0.1mm]  (coverage actually inspected per pass: 5-axis cross 30x30 / 8-axis rectangle 75x167.5. The height is the max up step)",
+    "  264 EOAT type (eoat_type)  0 = none 5 = 5-axis 8 = 8-axis",
+    "scan_go (267) is the scan start permission. When the robot reaches the origin it sets state (290) to 7",
+    "and waits until 1 arrives here. RCS sees state 7, tells ERUT the robot has arrived,",
+    "and writes 1 when ERUT sends the job start. The robot clears it to 0 itself when passing —",
+    "so a stale permission from the last cycle does not let it pass unchecked next time.",
+    "state 8 is the wetting (rubbing) phase — water is spread over the inspection surface right before the scan.",
+    "mark_target (268~269) is the marking spot. 268 = distance u [mm] along the arc from the origin,",
+    "269 = v [mm] up from the origin height. Read by dus_mark_point of the marking task.",
+    "marking task state (290): 10 moving, 11 against the wall (waiting for marking), 13 going home, 12 home reached = done.",
+    "mark_go (278) is the marking done signal. The marker belongs to ERUT, so the robot waits at 11,",
+    "and RCS writes 1 when ERUT sends req/mark_next. The robot clears it to 0 when passing.",
+    "299 = 5 means no wall contact was found at the marking spot.",
+    "The probes spread over the EOAT width, so the TCP does not need to go to the end of the grid —",
+    "the robot shortens the real travel to arc_run = arc length - EOAT width.",
+    "start_pose (316~321) is the tool flange pose when touching the work surface (as taught).",
+    "The EOAT centre offset (pendant variables eoat5_offset / eoat8_offset, [x,y,z] mm) is not used for robot",
+    "motion; it is used only to compute the scan coordinates (280~285, 286/287).",
+    "scan_arc (286/287) is the position on the arc during a scan. 286 = distance along the arc from the origin in this row",
+    "[0.1mm], 287 = accumulated up to the finished rows [mm]. Used to tell ERUT the actual inspection position (pos)",
+    "— the horizontal position in the grid is this value, the vertical is 291 (row number) x 296 (pitch, 0.1mm).",
+    "288/289 are the press state during a scan (0 not watched · 1 OK · 2 under-pressed (sensor lifted) · 3 over-pressed) and",
+    "that row's press correction [0.01mm] (read together with scan_arc since 2026-10-19). RCS raises E3002",
+    "PROBE_CONTACT_LOST if 288 stays 2 for more than 1 s — after a brief lift the robot presses back on its own.",
+    "probe_result (300~305) is the 3-point measurement result. 300/301/302 = X of the centre/origin (left)/right contact points",
+    "[0.1mm], 303 = extra advance at the centre to find the wall [0.1mm], 304/305 = number of attempts / contacts.",
+    "probe_poses (330~355) are those contact poses. 330~335 centre, 340~345 right, 350~355 origin",
+    "(position 0.1mm, rotation mrad), 346 = arc direction, 347~349 = probe centre offset [0.1mm].",
+    "The calibration (ERUT req/calibrate) moves these three points to the probe centre, fits a circle,",
+    "and reports the difference between its radius and the input radius (260+261) as calibration_error_mm.",
+    "Digital IO (0~3) are slots fixed by the controller (user manual 15.2 register mapping).",
+    "  0 standard digital inputs  1 configurable inputs + tool IO  2 standard digital outputs  3 configurable outputs + tool IO",
+    "One register has 16 bits; bit 0 upwards maps to the IO numbers. These are output registers, so",
+    "both reading and writing work — the node reads register 2, changes one bit and writes it back (digital_out).",
+    "The water spray valve and the marker will also be attached here. They do not exist yet, so the numbers are undecided;",
+    "adding the DO number to the screen list (operator-ui config/plc_io.json) is enough to pick them up.",
+    "The task no longer multiplies by the speed ratio (307) — the controller applies the ratio received with 29999",
+    "'speed -v N' (multiplying in the script accumulated per cell and kept slowing down)."
+  ],
+  "scale": {
+    "position_per_count": 0.1,
+    "rotation_per_count": 1.0,
+    "_comment": "Real value per register count. Positions in mm, rotations in mrad."
+  },
+  "read": {
+    "robot_mode": {
+      "address": 66,
+      "count": 1
+    },
+    "control_method": {
+      "address": 71,
+      "count": 1
+    },
+    "operation_mode": {
+      "address": 72,
+      "count": 1
+    },
+    "joint_position": {
+      "address": 73,
+      "count": 6,
+      "kind": "angle"
+    },
+    "tcp_absolute": {
+      "address": 384,
+      "count": 6,
+      "kind": "pose"
+    },
+    "tcp_zero_relative": {
+      "address": 280,
+      "count": 6,
+      "kind": "pose"
+    },
+    "scan_state": {
+      "address": 290,
+      "count": 10,
+      "kind": "raw"
+    },
+    "scan_arc": {
+      "address": 286,
+      "count": 4,
+      "kind": "raw"
+    },
+    "home_flag": {
+      "address": 276,
+      "count": 1
+    },
+    "task_state": {
+      "address": 500,
+      "count": 1
+    },
+    "speed_scale": {
+      "address": 17,
+      "count": 1
+    },
+    "digital_in": {
+      "address": 0,
+      "count": 1,
+      "kind": "raw"
+    },
+    "digital_out": {
+      "address": 2,
+      "count": 1,
+      "kind": "raw"
+    },
+    "probe_result": {
+      "address": 300,
+      "count": 6,
+      "kind": "raw"
+    },
+    "probe_poses": {
+      "address": 330,
+      "count": 26,
+      "kind": "raw"
+    }
+  },
+  "write": {
+    "linear_speed": {
+      "address": 306,
+      "count": 1
+    },
+    "speed_ratio": {
+      "address": 307,
+      "count": 1
+    },
+    "pose_src": {
+      "address": 308,
+      "count": 1
+    },
+    "_standby_comment": "310~315 = scan standby pose joints (formerly home, 2026-10-16). With 308 (pose_src)=1 the task reads them as Standby_joint. 322~327 = home joints; with 328 (home_src)=1 the task reads them as Home_joint.",
+    "standby_joint": {
+      "address": 310,
+      "count": 6,
+      "kind": "angle"
+    },
+    "home_joint": {
+      "address": 322,
+      "count": 6,
+      "kind": "angle"
+    },
+    "home_src": {
+      "address": 328,
+      "count": 1
+    },
+    "start_pose": {
+      "address": 316,
+      "count": 6,
+      "kind": "pose"
+    },
+    "work_area": {
+      "address": 256,
+      "count": 9,
+      "kind": "raw"
+    },
+    "param_src": {
+      "address": 266,
+      "count": 1
+    },
+    "scan_go": {
+      "address": 267,
+      "count": 1
+    },
+    "mark_target": {
+      "address": 268,
+      "count": 2,
+      "kind": "raw"
+    },
+    "mark_go": {
+      "address": 278,
+      "count": 1
+    },
+    "vehicle_ready": {
+      "address": 309,
+      "count": 1
+    },
+    "home_flag": {
+      "address": 276,
+      "count": 1
+    },
+    "digital_out": {
+      "address": 2,
+      "count": 1,
+      "kind": "raw"
+    }
+  }
+}

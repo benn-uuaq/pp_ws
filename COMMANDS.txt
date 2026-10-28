@@ -1,0 +1,164 @@
+================================================================================
+ pp_ws (piece-picking workspace) command summary                  2026-10-28
+================================================================================
+
+Run everything in a WSL (Ubuntu-22.04) terminal.
+Entering ~/pp_ws makes direnv load ROS 2 Humble + the build result + .venv automatically.
+
+
+--------------------------------------------------------------------------------
+ 1. Workspace environment / build
+--------------------------------------------------------------------------------
+
+cd ~/pp_ws                                  # direnv loads the environment
+direnv allow                                # once, and again after editing .envrc
+
+colcon build --symlink-install              # build everything (built with the .venv Python)
+colcon build --symlink-install --packages-select piece_picking   # one package only
+
+direnv reload                               # if "Package not found" after a build
+
+* With --symlink-install, Python code changes take effect without rebuilding.
+  Rebuild after adding / changing setup.py, package.xml or config files.
+
+
+--------------------------------------------------------------------------------
+ 2. Robot-camera calibration (robot_camera_calibration)
+--------------------------------------------------------------------------------
+
+ros2 run robot_camera_calibration calib_gui            # real robot + camera
+ros2 run robot_camera_calibration calib_gui --sim      # simulated robot + simulated camera
+ros2 run robot_camera_calibration calib_gui --config /path/my.yaml
+
+GUI steps
+  1) Robot IP (192.168.1.101) -> [Connect robot]
+  2) Tick the camera position (+X / -X / +Y / -Y, camera position seen from the robot base)
+  3) Tick the camera: RGB (Triton, 192.168.1.41) / Depth (Helios ToF, 192.168.1.35)
+     -> [Connect camera] -> check "Detected" for the marker in the live image
+  4) Check the marker position (reference -> marker centre X/Y/Z, rotation RX/RY/RZ) and the grid spacing
+  5) [Robot jog]: move the marker into the circle in the middle of the image
+       mode: continuous (while pressed) / step 1·5·10·50 mm
+       moves: lateral · depth (towards camera) · vertical (actual base axis in brackets), rotation: RX/RY/RZ (about the TCP)
+     -> [Save current pose]  (~/pp_ws/calibration/start_pose.yaml)
+     -> [Go to saved pose] returns there later. The red [Stop] stops immediately
+  6) With "Start calibration from the saved pose" ticked, [Start calibration] (hand on the emergency stop!)
+     -> moves to the saved pose first, then visits 27 poses around it
+
+Result files
+  ~/pp_ws/calibration/calibration_rgb.yaml     RGB (Triton) camera frame
+  ~/pp_ws/calibration/calibration_depth.yaml   depth (Helios ToF) camera frame
+  ~/pp_ws/calibration/runs/<time>/             per run: result.yaml, samples.yaml, run.log, images/
+  ~/pp_ws/calibration/start_pose.yaml          calibration start pose from [Save current pose]
+  ~/pp_ws/calibration/ui_state.yaml            last GUI inputs
+
+Check the robot moves without a camera (motion_tool)
+  ros2 run robot_camera_calibration motion_tool axes              # axis mapping only (no robot connection)
+  ros2 run robot_camera_calibration motion_tool plan              # 27-point grid around the current pose (no motion)
+  ros2 run robot_camera_calibration motion_tool step depth 20     # 20 mm towards the camera
+  ros2 run robot_camera_calibration motion_tool step lateral -30  # 30 mm to the left as seen by the camera
+  ros2 run robot_camera_calibration motion_tool step vertical 50  # 50 mm up
+  ros2 run robot_camera_calibration motion_tool run               # visit the 27 points and return (no measurement)
+
+  options: --sim (simulated robot), --yes (no confirmation), --camera-side=-y (instead of the config; use '=')
+  step moves at most 100 mm at a time. Ctrl+C stops with stopl.
+
+
+--------------------------------------------------------------------------------
+ 3. Piece picking (piece_picking)
+--------------------------------------------------------------------------------
+
+ros2 run piece_picking picking_gui              # real robot
+ros2 run piece_picking picking_gui --sim        # simulated robot
+ros2 run piece_picking picking_gui --config /path/my.yaml
+
+GUI steps
+  1) Robot IP -> [Connect robot]
+  2) Tick the calibration result: [RGB camera result] / [Depth (ToF) result]  (both loaded automatically at start)
+  3) Jog with the pendant and press [Save Home], [Save Pick standby], [Save Place]  (~/pp_ws/picking/poses.yaml)
+       Pick standby (optional) = pose above the box visited right before the approach point;
+       the tool turns towards the product only on the standby -> approach move
+  4) Tick the vision input mode: [Manual entry] / [Vision node trigger (not implemented, TODO)]
+  5) Enter the vision result (same camera frame as the selected result)
+       X/Y/Z [m] = position_m as is,  NX/NY/NZ = normal as is (sign / length automatic)
+     [Paste vision JSON] = copy candidates.json and press it to fill the fields
+       (one entry / several entries / whole file all work; a chooser opens for several. Long decimals cut to 0.01 mm / 1e-6)
+     [Apply rotation] ticked = tilt the tool along the normal (approach point -> product is straight along tool +Z)
+                      off / normal 0 = vertical pick with the tool orientation unchanged
+     The target panel shows the tilt, e.g. "x° from vertical, product face points towards base +X" -> check it matches reality
+  6) Gripper length (active TCP -> suction pad tip, tool +Z), approach distance (default 50 mm)
+     Must be entered when the pendant's active TCP is [0,0,0,0,0,0] (with 0 the move buttons are blocked)
+     Teach the place pose at the height with a product held (no gripper length is added to home / standby / place)
+  7) [Pick -> Place -> Home]  or  [Move to approach] / [Move to product] / [Retreat up, then home] / [Stop]
+       sequence: (home) -> (pick standby) -> approach -> product -> grip -> retreat along the tool (50 mm)
+                 -> lift along base +Z (200 mm, tool still tilted) -> place approach -> place -> release -> retreat -> home
+       Retreat (tool) / Lift (base +Z) are set in the target panel (config pick.retreat_mm / lift_mm)
+
+  * All motion is servoj (script loop on the robot). The pendant speed ratio does not apply — the GUI speed is the real speed.
+    Acceleration / deceleration are sine-shaped (smooth start / stop). If it still jerks, lower the servo accelerations in picking.yaml.
+  * Approach and retreat follow the tool axis (suction direction). A path that avoids the box walls is TODO.
+  * Suction outputs: DO4~7 together, normally ON / OFF while gripping (config gripper.suction_do, grip_level)
+    [Grip (OFF)] / [Release (ON)] in the gripper panel switch only the outputs
+  * First tests: final offset 20~50 mm, low speed.
+  * Last inputs: ~/pp_ws/picking/ui_state.yaml
+
+
+--------------------------------------------------------------------------------
+ 4. Robot control ROS 2 node (elite_robot_controller, copied from dusan_ws)
+--------------------------------------------------------------------------------
+
+ros2 run elite_robot_controller robot_control_node --ros-args -p robot_ip:=192.168.1.101
+ros2 launch elite_robot_controller elite_cs612.launch.py robot_ip:=192.168.1.101
+
+# test without a robot (simulated Elite controller)
+python3 src/elite_robot_controller/tools/elite_robot_simulator.py
+ros2 run elite_robot_controller robot_control_node --ros-args -p robot_ip:=127.0.0.1 -p modbus_port:=5502
+
+* The calibration and piece-picking GUIs connect directly to the robot's port 30001 without this node.
+
+
+--------------------------------------------------------------------------------
+ 5. Tests
+--------------------------------------------------------------------------------
+
+python -m pytest src/robot_camera_calibration/test      # about 3 minutes (includes simulated calibrations)
+python -m pytest src/piece_picking/test                 # about 1 minute
+python -m pytest src/robot_camera_calibration/test/test_core.py   # computation only, 1 second
+
+
+--------------------------------------------------------------------------------
+ 6. Config files (restart the GUI after editing; colcon build after adding new entries)
+--------------------------------------------------------------------------------
+
+~/pp_ws/src/robot_camera_calibration/config/calibration.yaml   robot speed, cameras (Helios/Triton), marker, grid, quality limits
+~/pp_ws/src/piece_picking/config/picking.yaml                  result file paths, approach distance, servo, suction, safety limits (z_min_mm etc.)
+~/pp_ws/.envrc                                                 direnv environment (ROS, .venv, colcon wrapper)
+
+
+--------------------------------------------------------------------------------
+ 7. Network / camera checks
+--------------------------------------------------------------------------------
+
+ip -4 addr                                  # in mirrored mode the Windows LAN address (e.g. 192.168.1.42) shows
+ping -c 1 192.168.1.101                     # robot
+ping -c 1 192.168.1.35                      # Helios ToF
+ping -c 1 192.168.1.41                      # Triton RGB
+
+# camera list (Arena SDK)
+python3 -c "from arena_api.system import system; [print(i['model'], i['serial'], i['ip']) for i in system.device_infos]"
+
+* WSL networking: networkingMode=mirrored in C:\Users\<user>\.wslconfig (after changing it: wsl --shutdown in PowerShell)
+* If the camera is "in use by another program": close ArenaView etc. on the other PC (e.g. 192.168.1.100)
+* If frames break (incomplete frames): increase packet_delay_ns in the config (Helios 20000 -> 40000)
+* Arena SDK location: ~/pp_ws/src/lucid_helios/ArenaSDK_Linux_x64 (COLCON_IGNORE, not in git — see src/lucid_helios/README.md)
+  If moved, run in its folder: sudo sh Arena_SDK_Linux_x64_AVMP.conf -r
+
+
+--------------------------------------------------------------------------------
+ 8. More documentation
+--------------------------------------------------------------------------------
+
+~/pp_ws/README.md
+~/pp_ws/src/robot_camera_calibration/README.md
+~/pp_ws/src/piece_picking/README.md
+~/pp_ws/src/elite_robot_controller/README.md
+~/pp_ws/src/lucid_helios/README.md

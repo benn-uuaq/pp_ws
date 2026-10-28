@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>robot_camera_calibration</name>
+  <version>0.1.0</version>
+  <description>Robot-camera (eye-to-hand) calibration for piece picking (Helios, ArUco)</description>
+  <maintainer email="hoonyoung323@gmail.com">pp_ws</maintainer>
+  <license>Proprietary</license>
+
+  <!-- the 30001 driver (Robot_30001) is taken from this package -->
+  <exec_depend>elite_robot_controller</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pyqt5</exec_depend>
+  <!-- pip dependency: arena_api (LUCID Arena SDK wheel, no rosdep key; see README) -->
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,82 @@
+# ============================================================================
+# Piece-picking settings (pp_ws)
+# Units: mm and seconds unless noted. Robot poses are m / rad.
+#
+# Robot IP, input mode, product pose, approach distance, gripper length, rotation option etc. changed in the GUI (picking_gui)
+# are not written to this file; they are kept in ui_state.yaml in output.directory and overlaid at the next start.
+# ============================================================================
+
+robot:
+  ip: 192.168.1.101
+  port: 30001
+  rotation_convention: rpy
+  velocity: 0.05                 # [m/s] linear speed (changeable in the GUI). Start slowly
+  acceleration: 0.30             # [m/s^2] (for movel; servoj uses servo.lin_acc)
+  move_command: "movel({pose}, a={a}, v={v})"
+  stop_command: "stopl(1.0)"
+  move_timeout_s: 60.0
+  position_tolerance_mm: 1.0
+
+calibration:
+  # per-camera results from robot_camera_calibration (calib_gui). Both are loaded automatically at start.
+  use: rgb                       # result to use (GUI checkbox). Vision coordinates are entered in this camera frame
+  result_files:
+    rgb: ~/pp_ws/calibration/calibration_rgb.yaml       # Triton RGB camera frame
+    depth: ~/pp_ws/calibration/calibration_depth.yaml   # Helios ToF camera frame
+
+vision:
+  mode: manual                   # manual = manual entry, trigger = vision node trigger (not implemented yet)
+  # vision node trigger (TODO: implement once the interface is defined)
+  trigger_topic: /vision/trigger
+  result_topic: /vision/result
+  timeout_s: 5.0
+  # manual entry (same camera frame as the selected calibration)
+  manual_point_m: [0.0, 0.0, 1.0]       # vision position_m as is [m]
+  manual_normal: [0.0, 0.0, 0.0]        # vision normal as is (direction vector; sign / length handled automatically)
+
+pick:
+  approach_mm: 50.0              # approach distance, backed off along the tool axis (suction direction)
+  # after the pick: back off retreat_mm along the tool axis, then lift lift_mm straight up (base +Z) with the
+  # tool still tilted, so the held product clears the box before the tool turns back upright.
+  retreat_mm: 50.0
+  lift_mm: 200.0
+  final_offset_mm: 0.0           # stop the suction tip this far in front of the product point (against the tool axis) (20~50 recommended for first tests)
+  # gripper (suction) length [mm]: from the pendant's active TCP to the suction pad tip along tool +Z (entered in the GUI).
+  # The robot TCP target is pulled back by this so the suction tip lands on the product. If the active TCP is the flange (0): flange face -> pad tip,
+  # if the pendant's active TCP already includes the tool length: 0 (prevents applying it twice; the GUI warns).
+  gripper_length_mm: 0.0
+  # Apply rotation (GUI checkbox): true = tilt tool +Z along the normal when picking (minimal wrist rotation),
+  # false or normal 0 = vertical pick with the tool orientation unchanged. Reference orientation = pick standby pose, else home (when starting from home), else current.
+  apply_normal: false
+  descent_speed_ratio: 0.3       # the last segment before the product / place and the retreats run at this fraction of the speed
+  start_from_home: true          # start picking from home (go home first if not there)
+
+servo:                           # all motion is servoj (script loop on the robot, same approach as dusan_v5)
+  dt: 0.004                      # [s] servoj t (control cycle)
+  lookahead: 0.1                 # [s] lookahead_time (0.03 ~ 0.2). Longer = smoother, follows slightly later
+  gain: 300                      # (100 ~ 2000). Higher follows faster but may vibrate
+  # acceleration / deceleration are sine-shaped (acceleration 0 -> peak -> 0), so starts and stops are smooth. The values below are peaks.
+  # If it still jerks, lower the accelerations (e.g. joint_acc_deg_s2 40).
+  lin_acc: 0.3                   # [m/s^2] linear acceleration / deceleration
+  rot_speed_deg_s: 30.0          # [deg/s] max tool rotation speed during linear moves
+  rot_acc_deg_s2: 60.0           # [deg/s^2]
+  joint_speed_deg_s: 30.0        # [deg/s] moves to saved poses (joint interpolation) — joint that turns the most
+  joint_acc_deg_s2: 60.0         # [deg/s^2]
+  # Note: the pendant speed ratio does not apply to servoj. These values and the GUI speed are the real speeds.
+
+gripper:
+  suction_do: [4, 5, 6, 7]       # suction standard digital outputs (switched together in one script). null = skip grip / release
+  grip_level: false              # output value while gripping. false = normally ON, OFF while gripping
+  grip_wait_s: 0.5               # wait after gripping (until the vacuum builds up)
+  release_wait_s: 0.5            # wait after releasing (until the product drops)
+
+safety:
+  max_move_mm: 1200.0             # reject targets farther than this from the current TCP (catches unit / frame mistakes)
+  z_min_mm: null                 # lower Z limit of the suction tip in the base frame (set after measuring the table / box bottom height)
+  workspace_mm: null             # suction tip workspace [[xmin, xmax], [ymin, ymax], [zmin, zmax]]
+  max_tilt_deg: 60.0             # reject if the suction direction tilts more than this from vertical
+  max_rotation_deg: 90.0         # reject if the tool must rotate more than this from the reference pose (avoids big wrist turns)
+
+output:
+  directory: ~/pp_ws/picking     # ui_state.yaml, poses.yaml (home / pick standby / place)
+  poses_file: poses.yaml
