@@ -67,7 +67,8 @@ def test_line_script_structure():
     assert "get_inverse_kin_has_solution(sv_p1" in s and "halt" in s      # no motion without an IK solution
     assert "interpolate_pose(sv_p0, sv_p1, sv_s)" in s
     assert "servoj(sv_q, t = sv_dt, lookahead_time = sv_look, gain = sv_gain)" in s
-    assert "controller_timestamp()" in s and "stopj(2.0)" in s
+    assert "sv_t = sv_t + sv_dt" in s and "controller_timestamp" not in s   # fixed time base: servoj blocks for sv_dt
+    assert "get_actual_joint_speeds()" in s and "stopj(1.000)" in s        # settle check, then a gentle stopj
     assert re.search(r"\bp\b\s*=|\bj\b\s*=", s) is None                 # the names p and j clash with literals
 
 
@@ -78,19 +79,109 @@ def test_joint_script_structure():
     assert s.count("sv_q0[") == 12 and "servoj(sv_q" in s
 
 
-class _FakeRealRobot:
-    """Imitates a real robot with send_script: only collects the scripts sent."""
+class _ServoSim:
+    """Runs a generated Elite script in Python against a simple servo model.
 
-    def __init__(self):
-        self.scripts, self.last_error = [], ""
+    Joint space = pose space here (identity kinematics). servoj: moving average of the targets over the lookahead
+    time (as the manual describes), then the actual joints follow that with a first-order lag. Records every call.
+    """
+
+    def __init__(self, q0, servo, lag_s=0.05, noise=0.0):
+        self.q = np.array(q0, dtype=float)
+        self.qd = np.zeros(6)
+        self.dt, self.look, self.lag, self.noise = servo["dt"], servo["lookahead"], lag_s, noise
+        self.buf, self.sent, self.stops, self.at_stop = [], [], [], None
+        self.rng = np.random.default_rng(0)
+
+    def servoj(self, q, t=0.004, lookahead_time=0.1, gain=300):
+        self.sent.append(np.array(q, dtype=float))
+        self.buf = (self.buf + [np.array(q, dtype=float)])[-max(1, int(round(lookahead_time / t))):]
+        target = np.mean(self.buf, axis=0)
+        new = self.q + (target - self.q) * min(1.0, t / self.lag)
+        self.qd = (new - self.q) / t + self.noise * self.rng.standard_normal(6)
+        self.q = new
+
+    def stopj(self, a):
+        self.stops.append(a)
+        self.at_stop = (self.q.copy(), self.qd.copy())
+
+    def run(self, script):
+        lines = []
+        for line in script.splitlines():                       # Elite script -> Python: drop "end", map "halt"
+            if line.strip() == "end":
+                continue
+            lines.append(line.replace("halt", "raise RuntimeError('halt')") if line.strip() == "halt" else line)
+        ns = {
+            "ceil": math.ceil, "sin": math.sin, "textmsg": print, "set_tcp": lambda p: None,
+            "servoj": self.servoj, "stopj": self.stopj,
+            "get_actual_joint_positions": lambda: list(self.q), "get_actual_joint_speeds": lambda: list(self.qd),
+            "get_actual_tcp_pose": lambda: list(self.q),
+            "get_inverse_kin_has_solution": lambda p, qnear=None: True,
+            "get_inverse_kin": lambda p, qnear=None: list(p),
+            "interpolate_pose": lambda a, b, s: list(np.add(a, np.subtract(b, a) * s)),
+        }
+        exec("\n".join(lines), ns)                               # noqa: S102 - our own generated script
+        name = re.match(r"def (\w+)\(", script).group(1)
+        ns[name]()
+
+
+@pytest.mark.parametrize("kind", ["line", "joint"])
+def test_script_runs_smoothly_and_ends_only_after_settling(kind):
+    servo = dict(SERVO)
+    q0, q1 = [0.0, -1.5, 1.2, -1.2, -1.57, 0.0], [0.3, -1.3, 1.0, -1.0, -1.4, 0.4]
+    vmax, acc, T = sm.joint_profile(q0, q1, servo)
+    sim = _ServoSim(q0, servo)
+    script = (sm.build_joint_script(q1, vmax, acc, [0] * 6, servo) if kind == "joint"
+              else sm.build_line_script(q1, vmax, acc, [0] * 6, servo))
+    sim.run(script)
+    sent = np.array(sim.sent)
+    n_profile = int(math.ceil(T / servo["dt"]))
+    assert np.allclose(sent[n_profile - 1], q1) and np.allclose(sent[-1], q1)
+    assert np.allclose(sent[n_profile - 2], sent[n_profile - 1], atol=1e-4)   # arrives with ~zero speed
+    # evenly timed, smooth targets: per-cycle steps never jump (second difference bounded by the peak acceleration)
+    span = np.max(np.abs(np.subtract(q1, q0)))
+    d2 = np.abs(np.diff(sent[:n_profile], n=2, axis=0)).max()
+    assert d2 <= acc * span * servo["dt"] ** 2 * 1.05
+    # it held the target until the robot really settled, then stopped once, gently
+    hold = len(sent) - n_profile
+    assert math.ceil(2 * servo["lookahead"] / servo["dt"]) <= hold < servo["settle_max_s"] / servo["dt"]
+    q_end, qd_end = sim.at_stop
+    assert sim.stops == [servo["stop_acc"]]
+    assert np.max(np.abs(q_end - q1)) <= servo["settle_pos_tol_rad"]
+    assert np.max(np.abs(qd_end)) <= servo["settle_vel_tol_rad_s"]
+
+
+def test_script_gives_up_settling_after_settle_max():
+    servo = dict(SERVO)
+    q0, q1 = [0.0] * 6, [0.05, 0, 0, 0, 0, 0]
+    vmax, acc, T = sm.joint_profile(q0, q1, servo)
+    sim = _ServoSim(q0, servo, noise=0.05)                       # speed reading never quiet
+    sim.run(sm.build_joint_script(q1, vmax, acc, [0] * 6, servo))
+    hold = len(sim.sent) - int(math.ceil(T / servo["dt"]))
+    assert hold == int(math.ceil(servo["settle_max_s"] / servo["dt"])) and sim.stops == [servo["stop_acc"]]
+
+
+class _FakeRealRobot:
+    """Imitates a real robot with send_script: collects the scripts sent.
+
+    running_for: if set, the robot reports "program running" for that long after each script (None = flag unknown).
+    """
+
+    def __init__(self, running_for=None):
+        self.scripts, self.last_error, self.events = [], "", []
         self.pose = [0.0, 0.4, 0.5, math.pi, 0.0, 0.0]
+        self.running_for, self.sent_at = running_for, 0.0
 
     def get_state(self, max_age_s=1.0):
+        running = None if self.running_for is None else (time.time() - self.sent_at < self.running_for)
         return RobotState(self.pose, [0, 0, 0.1, 0, 0, 0], [0.0] * 6, True, False, False, time.time(),
-                          [0.0, -1.5, 1.2, -1.2, -1.57, 0.0])
+                          [0.0, -1.5, 1.2, -1.2, -1.57, 0.0], running)
 
     def send_script(self, line):
+        if self.running_for is not None and time.time() - self.sent_at < self.running_for:
+            self.events.append("ABORTED a running program")
         self.scripts.append(line)
+        self.sent_at = time.time()
         return True
 
     def wait_until_reached(self, target, tol, timeout, cancel=None):
@@ -111,6 +202,27 @@ def test_mover_sends_scripts_with_active_tcp_and_timeout():
     s = robot.scripts[-1]
     assert s.startswith("def pp_digital_out():") and _blocks_balanced(s)
     assert re.findall(r"set_standard_digital_out\((\d+), (\w+)\)", s) == [(str(i), "False") for i in (4, 5, 6, 7)]
+
+
+def test_next_script_waits_until_the_robot_program_has_ended():
+    """The robot keeps its program running (holding / settling) 0.6 s after each send: the next script must wait."""
+    robot = _FakeRealRobot(running_for=0.6)
+    mover = sm.ServoMover(robot, SERVO)
+    target = [0.1, 0.4, 0.5, math.pi, 0.0, 0.0]
+    t0 = time.time()
+    assert mover.line(target, 0.05) == (True, "")
+    assert time.time() - t0 >= 0.6                                   # waited for the program end ...
+    assert mover.digital_out([4, 5, 6, 7], False)                     # ... so the next script aborts nothing
+    assert mover.line([0.1, 0.45, 0.5, math.pi, 0.0, 0.0], 0.05) == (True, "")
+    assert robot.events == [] and len(robot.scripts) == 3
+
+
+def test_flag_not_reported_falls_back_to_the_guard_wait():
+    robot = _FakeRealRobot(running_for=None)                          # controller does not report the flag
+    mover = sm.ServoMover(robot, dict(SERVO, end_guard_s=0.2))
+    t0 = time.time()
+    assert mover.line([0.1, 0.4, 0.5, math.pi, 0.0, 0.0], 0.05) == (True, "")
+    assert time.time() - t0 >= 0.2 and mover._flag_works is False
 
 
 def test_mover_on_sim_robot_reaches_target():

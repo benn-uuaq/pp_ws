@@ -1,12 +1,23 @@
 """
 servo_motion.py - all robot motion as servoj (Elite CS scripts sent to port 30001).
 
-Same approach as dusan_v5 (dus5_pass_r.script):
+Based on dusan_v5 (dus5_pass_r.script):
   * a script loop on the robot computes the next target every control cycle (sv_dt = 4 ms) and sends it with servoj.
-  * progress advances by the **actually elapsed time** from controller_timestamp().
+  * servoj blocks for exactly t (script manual 3.1.6), so every call advances the profile time by exactly sv_dt.
+    (dusan_v5 advanced by controller_timestamp() differences; any jitter or coarse resolution of that timestamp
+    spaces the targets unevenly, which the robot feels as small jerks. A loop that cannot keep up now just runs
+    slightly slower instead of jumping.)
   * velocity profile: trapezoid whose acceleration / deceleration phases are sine-shaped — acceleration starts and ends at 0,
     so starting and stopping do not jerk (peak acceleration = configured acceleration).
-  * after reaching the end it keeps sending for twice the lookahead so the robot catches up, then stopj.
+  * end: servoj filters the targets (mean over the lookahead time + spline) and the servo follows with a lag, so the robot
+    is still moving when the profile ends. The final target is held until the robot has really settled (every joint within
+    settle_pos_tol_rad of the target and slower than settle_vel_tol_rad_s for settle_cycles cycles in a row, at least
+    2 x lookahead, at most settle_max_s). Only then the program ends with a gentle stopj (a no-op when settled).
+    Ending after a fixed 2 x lookahead with stopj(2.0) stopped a still-moving robot hard — the jolt at every stop.
+  * the PC sends the next script (motion or suction output) only after the robot reports that the program has ended
+    (30001 robot mode "task running" flag). Sending it earlier aborted a program that was still servoing, and the
+    controller then braked the robot itself — a jolt that came and went with the timing. If the controller does not
+    report the flag for 30001 scripts, the PC falls back to waiting end_guard_s after arrival.
   * Note: the pendant speed ratio does not apply to servoj. The speed is exactly the value given here.
 
 Two kinds of motion
@@ -22,6 +33,7 @@ set again with set_tcp to match the target pose (relative to the active TCP) wit
 from __future__ import annotations
 
 import math
+import time
 from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
@@ -37,6 +49,12 @@ DEFAULT_SERVO = {
     "rot_acc_deg_s2": 60.0,    # [deg/s^2]
     "joint_speed_deg_s": 30.0, # [deg/s] max joint speed (joint that turns the most)
     "joint_acc_deg_s2": 60.0,  # [deg/s^2]
+    "settle_pos_tol_rad": 0.001,    # end: every joint within this of the final target ...
+    "settle_vel_tol_rad_s": 0.005,  # ... and slower than this ...
+    "settle_cycles": 10,            # ... for this many cycles in a row (10 x 4 ms)
+    "settle_max_s": 1.0,            # stop waiting for the settle after this
+    "stop_acc": 1.0,                # [rad/s^2] stopj at the very end (only acts if not settled)
+    "end_guard_s": 0.3,             # PC fallback wait after arrival if the robot does not report its program state
 }
 
 
@@ -110,15 +128,19 @@ def joint_profile(q0: Sequence[float], q1: Sequence[float], servo: dict) -> Tupl
 
 def _loop_script(name: str, head: str, target_expr: str, vmax: float, acc: float,
                  tcp_offset: Sequence[float], servo: dict) -> str:
-    """Common servoj loop. head sets sv_q and the start / end; target_expr builds the joint values every cycle.
+    """Common servoj loop. head sets sv_q and the start / end; target_expr builds the joint values sv_q from sv_s.
 
-    The progress variable sv_s is a function of the elapsed time sv_t (same formula as profile_position, sine acceleration / deceleration).
+    Phase 1: every cycle the profile time sv_t advances by exactly sv_dt (servoj blocks for sv_dt) and the progress
+    variable sv_s follows profile_position (sine acceleration / deceleration). Phase 2 (sv_s = 1): the final target is
+    held until every joint is within sv_ptol of it and slower than sv_vtol for sv_nstill cycles in a row (at least
+    sv_nmin cycles = 2 x lookahead so the servoj filter is flushed, at most sv_nmax cycles). Then a gentle stopj.
     """
     v, ta, tc = smooth_profile(vmax, acc)
+    dt = float(servo["dt"])
     return (
         f"def {name}():\n"
         f"  set_tcp({_fmt(tcp_offset)})\n"
-        f"  sv_dt = {float(servo['dt']):.4f}\n"
+        f"  sv_dt = {dt:.4f}\n"
         f"  sv_look = {float(servo['lookahead']):.3f}\n"
         f"  sv_gain = {int(servo['gain'])}\n"
         f"{head}"
@@ -127,20 +149,19 @@ def _loop_script(name: str, head: str, target_expr: str, vmax: float, acc: float
         f"  sv_tc = {tc:.6f}\n"
         "  sv_te = 2.0 * sv_ta + sv_tc\n"
         "  sv_pi = 3.14159265\n"
+        f"  sv_ptol = {float(servo['settle_pos_tol_rad']):.6f}\n"
+        f"  sv_vtol = {float(servo['settle_vel_tol_rad_s']):.6f}\n"
+        f"  sv_nstill = {int(servo['settle_cycles'])}\n"
+        "  sv_nmin = ceil(sv_look * 2.0 / sv_dt)\n"
+        f"  sv_nmax = {int(math.ceil(float(servo['settle_max_s']) / dt))}\n"
         "  sv_t = 0\n"
         "  sv_s = 0\n"
-        "  sv_set = 0\n"
-        "  sv_nset = ceil(sv_look * 2.0 / sv_dt)\n"
-        "  sv_tp = controller_timestamp()\n"
-        "  while (sv_set < sv_nset):\n"
-        "    sv_tn = controller_timestamp()\n"
-        "    sv_h = sv_tn - sv_tp\n"
-        "    sv_tp = sv_tn\n"
-        "    if (sv_h <= 0 or sv_h > 0.05):\n"
-        "      sv_h = sv_dt\n"
-        "    end\n"
+        "  sv_hold = 0\n"
+        "  sv_still = 0\n"
+        "  sv_done = False\n"
+        "  while (sv_done == False):\n"
         "    if (sv_s < 1.0):\n"
-        "      sv_t = sv_t + sv_h\n"
+        "      sv_t = sv_t + sv_dt\n"
         "      if (sv_t < sv_ta):\n"
         "        sv_s = 0.5 * sv_vmax * (sv_t - sv_ta / sv_pi * sin(sv_pi * sv_t / sv_ta))\n"
         "      elif (sv_t < sv_ta + sv_tc):\n"
@@ -151,13 +172,34 @@ def _loop_script(name: str, head: str, target_expr: str, vmax: float, acc: float
         "      else:\n"
         "        sv_s = 1.0\n"
         "      end\n"
-        "    else:\n"
-        "      sv_set = sv_set + 1\n"
-        "    end\n"
         f"{target_expr}"
+        "    else:\n"
+        "      sv_hold = sv_hold + 1\n"
+        "      if (sv_hold >= sv_nmin):\n"
+        "        sv_qa = get_actual_joint_positions()\n"
+        "        sv_qv = get_actual_joint_speeds()\n"
+        "        sv_ok = True\n"
+        "        sv_i = 0\n"
+        "        while (sv_i < 6):\n"
+        "          sv_e = sv_qa[sv_i] - sv_q[sv_i]\n"
+        "          if (sv_e > sv_ptol or sv_e < -sv_ptol or sv_qv[sv_i] > sv_vtol or sv_qv[sv_i] < -sv_vtol):\n"
+        "            sv_ok = False\n"
+        "          end\n"
+        "          sv_i = sv_i + 1\n"
+        "        end\n"
+        "        if (sv_ok):\n"
+        "          sv_still = sv_still + 1\n"
+        "        else:\n"
+        "          sv_still = 0\n"
+        "        end\n"
+        "        if (sv_still >= sv_nstill or sv_hold >= sv_nmax):\n"
+        "          sv_done = True\n"
+        "        end\n"
+        "      end\n"
+        "    end\n"
         "    servoj(sv_q, t = sv_dt, lookahead_time = sv_look, gain = sv_gain)\n"
         "  end\n"
-        "  stopj(2.0)\n"
+        f"  stopj({float(servo['stop_acc']):.3f})\n"
         "end\n"
     )
 
@@ -174,7 +216,7 @@ def build_line_script(target_pose: Sequence[float], vmax: float, acc: float,
         "    halt\n"
         "  end\n"
     )
-    target = ("    sv_q = get_inverse_kin(interpolate_pose(sv_p0, sv_p1, sv_s), qnear = sv_q)\n")
+    target = ("      sv_q = get_inverse_kin(interpolate_pose(sv_p0, sv_p1, sv_s), qnear = sv_q)\n")
     return _loop_script("pp_servo_line", head, target, vmax, acc, tcp_offset, servo)
 
 
@@ -187,7 +229,7 @@ def build_joint_script(target_joints: Sequence[float], vmax: float, acc: float,
         "  sv_q = sv_q0\n"
     )
     terms = ", ".join(f"sv_q0[{i}] + (sv_q1[{i}] - sv_q0[{i}]) * sv_s" for i in range(6))
-    target = f"    sv_q = [{terms}]\n"
+    target = f"      sv_q = [{terms}]\n"
     return _loop_script("pp_servo_joint", head, target, vmax, acc, tcp_offset, servo)
 
 
@@ -210,6 +252,44 @@ class ServoMover:
         self.tol_m = float(tolerance_mm) / 1000.0
         self.log = log
         self.real = hasattr(robot, "send_script")
+        self._flag_works = None        # does the robot report "program running" for our scripts? (learned)
+        self._saw_running = False
+
+    def _send(self, script: str) -> bool:
+        """Send a script and, on the real robot, note whether it shows up as a running program."""
+        if not self.robot.send_script(script):
+            return False
+        self._saw_running = False
+        if self._flag_works is not False:
+            end = time.time() + 0.3
+            while time.time() < end:
+                st = self.robot.get_state()
+                if st is not None and st.program_running:
+                    self._saw_running = self._flag_works = True
+                    break
+                time.sleep(0.01)
+            if not self._saw_running:
+                self._flag_works = False   # not reported for our scripts: use the fixed wait from now on
+        return True
+
+    def _wait_program_end(self) -> None:
+        """Real robot: wait until the script program has ended (it holds the target until the robot has settled).
+
+        Uses the "program running" flag when the robot was seen reporting it for this script; otherwise waits
+        end_guard_s. If the flag stays on far longer than the settle can take, it is not trusted any more.
+        """
+        guard = float(self.servo["end_guard_s"])
+        if not self._saw_running:
+            time.sleep(guard)
+            return
+        end = time.time() + float(self.servo["settle_max_s"]) + 1.0
+        while time.time() < end:
+            st = self.robot.get_state()
+            if st is not None and st.program_running is False:
+                return
+            time.sleep(0.01)
+        self._flag_works = False
+        self.log("  [WARN] the robot still reports a running program after the move; using a fixed wait from now on")
 
     def _state(self):
         st = self.robot.get_state()
@@ -220,8 +300,11 @@ class ServoMover:
         return st
 
     def _wait(self, check_pose, duration: float, cancel) -> Tuple[bool, str]:
-        timeout = duration * 1.5 + 2.0 * float(self.servo["lookahead"]) + 3.0
-        return self.robot.wait_until_reached(check_pose, self.tol_m, timeout, cancel=cancel)
+        timeout = duration * 1.5 + float(self.servo["settle_max_s"]) + 3.0
+        ok, why = self.robot.wait_until_reached(check_pose, self.tol_m, timeout, cancel=cancel)
+        if ok and self.real:
+            self._wait_program_end()      # never let the next script abort a program that is still servoing
+        return ok, why
 
     def line(self, target_pose: Sequence[float], lin_speed: float, cancel=None) -> Tuple[bool, str]:
         st = self._state()
@@ -230,7 +313,7 @@ class ServoMover:
             return True, ""
         self.log(f"  servoj linear {T:.1f} s")
         if self.real:
-            ok = self.robot.send_script(build_line_script(target_pose, vmax, acc, st.tcp_offset, self.servo))
+            ok = self._send(build_line_script(target_pose, vmax, acc, st.tcp_offset, self.servo))
         else:
             d = float(np.linalg.norm(np.subtract(target_pose[:3], st.tcp_pose[:3])))
             ok = self.robot.move_linear(target_pose, 1.0, max(d / max(T, 1e-3), 1e-4))
@@ -254,11 +337,14 @@ class ServoMover:
         if T <= 0.0:
             return True, ""
         self.log(f"  servoj joint {T:.1f} s")
-        if not self.robot.send_script(build_joint_script(target_joints, vmax, acc, st.tcp_offset, self.servo)):
+        if not self._send(build_joint_script(target_joints, vmax, acc, st.tcp_offset, self.servo)):
             return False, f"Failed to send the script: {self.robot.last_error}"
         return self._wait(check_pose, T, cancel)
 
     def digital_out(self, indices: Sequence[int], value: bool) -> bool:
         if not self.real:
             return True
-        return self.robot.send_script(build_digital_out_script(indices, value))
+        if not self._send(build_digital_out_script(indices, value)):
+            return False
+        self._wait_program_end()          # a short program, but the next motion must not cut it off either
+        return True

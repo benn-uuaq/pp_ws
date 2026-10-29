@@ -62,6 +62,15 @@ servo:                           # all motion is servoj (script loop on the robo
   rot_acc_deg_s2: 60.0           # [deg/s^2]
   joint_speed_deg_s: 30.0        # [deg/s] moves to saved poses (joint interpolation) — joint that turns the most
   joint_acc_deg_s2: 60.0         # [deg/s^2]
+  # End of every move: the robot program holds the final target until the robot has really settled
+  # (all joints within settle_pos_tol_rad and slower than settle_vel_tol_rad_s for settle_cycles cycles,
+  # at most settle_max_s), then ends with stopj(stop_acc). The PC sends the next script only after that.
+  settle_pos_tol_rad: 0.001
+  settle_vel_tol_rad_s: 0.005
+  settle_cycles: 10
+  settle_max_s: 1.0
+  stop_acc: 1.0                  # [rad/s^2] only acts if the settle timed out
+  end_guard_s: 0.3               # PC wait after arrival if the robot does not report its program state
   # Note: the pendant speed ratio does not apply to servoj. These values and the GUI speed are the real speeds.
 
 gripper:

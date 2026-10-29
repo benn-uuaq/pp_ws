@@ -33,6 +33,7 @@ class RobotState:
     protective_stopped: bool
     timestamp: float               # time.time() when this state was received
     joint_positions: Optional[List[float]] = None   # actual joint angles [rad] (pp_ws)
+    program_running: Optional[bool] = None          # robot mode "task running" flag (None if unknown)
 
     def is_moving(self, velocity_tol: float = 0.01) -> bool:
         return max((abs(v) for v in self.joint_velocity), default=0.0) > velocity_tol
@@ -212,6 +213,7 @@ class RobotInterface(RobotBase):
                 protective_stopped=bool(d.is_robot_protective_stopped),
                 timestamp=time.time(),
                 joint_positions=[float(v) for v in d.actual_joint],
+                program_running=bool(d.is_task_running) if hasattr(d, "is_task_running") else None,
             )
         except (AttributeError, TypeError, ValueError):
             return None

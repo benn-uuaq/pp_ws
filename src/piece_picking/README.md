@@ -112,10 +112,20 @@ port 30001 and a **loop on the robot** computes the next target every 4 ms and s
   Checked with `get_inverse_kin_has_solution` before starting; without a solution it does not move and `halt`s.
 * **Joint interpolation** (home, pick standby): joint-space interpolation to the saved joints → `servoj` (instead of movej).
 * Velocity profile: a trapezoid whose **acceleration / deceleration phases are sine-shaped** — acceleration starts and
-  ends at 0, so starts and stops do not jerk (the configured acceleration is the peak). Progress advances by the real
-  elapsed time from `controller_timestamp()`; at the end it keeps sending for twice the lookahead, then `stopj`.
-  The slower of position and rotation sets the timing. If it still jerks, lower the `servo` accelerations
-  (e.g. `joint_acc_deg_s2: 40`).
+  ends at 0 (the configured acceleration is the peak). The slower of position and rotation sets the timing.
+* **Time base**: `servoj` blocks for exactly `t` (script manual 3.1.6), so every call advances the profile by exactly
+  `dt`. (Advancing by `controller_timestamp()` differences, as dusan_v5 does, spaces the targets unevenly whenever the
+  timestamp jitters or an iteration runs long — felt as small jerks.)
+* **Stopping**: servoj filters the targets (mean over the lookahead time + spline) and the servo lags behind, so the
+  robot is still moving when the profile ends. The program holds the final target until the robot has **really settled**
+  (all joints within `settle_pos_tol_rad`, slower than `settle_vel_tol_rad_s`, for `settle_cycles` cycles; at least
+  2 × lookahead, at most `settle_max_s`), then ends with a gentle `stopj(stop_acc)` that only acts after a timeout.
+* **Program boundaries**: each move / suction switch is its own script, and a new script aborts a running one — the
+  controller then brakes the robot itself. The PC therefore sends the next script only after the robot reports the
+  program has ended (30001 robot mode "task running" flag). If the controller does not report it for 30001 scripts,
+  the PC waits `end_guard_s` after arrival instead (logged once).
+* If it still jerks after this, lower the `servo` accelerations (e.g. `joint_acc_deg_s2: 40`) or raise `lookahead`
+  (max 0.2).
 * The first line of the script sets the active TCP currently reported by the robot again with `set_tcp`
   (30001 scripts run in a different context from the pendant task).
 * **The pendant speed ratio does not apply to servoj.** The GUI speed and the `servo` settings are the real speeds.
@@ -126,6 +136,8 @@ port 30001 and a **loop on the robot** computes the next target every 4 ms and s
 | `lin_acc` | 0.3 m/s² | linear acceleration / deceleration (peak) |
 | `rot_speed_deg_s` · `rot_acc_deg_s2` | 30 °/s · 60 °/s² | tool rotation during linear moves |
 | `joint_speed_deg_s` · `joint_acc_deg_s2` | 30 °/s · 60 °/s² | moves to saved poses (joint that turns the most) |
+| `settle_pos_tol_rad` · `settle_vel_tol_rad_s` · `settle_cycles` · `settle_max_s` | 0.001 rad · 0.005 rad/s · 10 · 1.0 s | end-of-move settle check |
+| `stop_acc` · `end_guard_s` | 1.0 rad/s² · 0.3 s | final stopj (only after a settle timeout) · PC fallback wait |
 
 ## Suction outputs
 
